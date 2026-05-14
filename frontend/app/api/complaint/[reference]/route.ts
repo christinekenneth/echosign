@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server'
-import { supabase, supabaseAdmin } from '@/lib/supabase'
+import { supabaseAdmin } from '@/lib/supabase'
 
 // ─── GET /api/complaint/[reference] ──────────────────────────
 // This runs when someone checks the status of their complaint
@@ -138,16 +138,19 @@ export async function PUT(
       )
     }
 
-    // Update the complaint status
-    const { error: updateError } = await supabase
+    // Update the complaint status using the numeric ID so RLS cannot interfere.
+    const { data: updated, error: updateError } = await supabaseAdmin
       .from('complaints')
       .update({
         status,
         updated_at: new Date().toISOString(),
       })
-      .eq('reference', reference.toUpperCase())
+      .eq('id', complaint.id)
+      .select('id, reference, status, updated_at')
+      .single()
 
     if (updateError) throw updateError
+    console.log('[PUT complaint] saved:', updated)
 
     // If a response was provided save it too
 // Only save response if responseText is provided and not empty

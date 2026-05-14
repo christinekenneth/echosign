@@ -1,10 +1,11 @@
 'use client';
 
-import { useState } from 'react';
+import { useState, useCallback } from 'react';
 import EchoAvatar from '@/components/EchoAvatar';
 import TileGrid from '@/components/TileGrid';
 import ProgressBar from '@/components/ProgressBar';
 import LanguageSelector from '@/components/LanguageSelector';
+import SignCapture from '@/components/SignCapture';
 
 type Screen = 'welcome' | 'issue' | 'record' | 'confirm' | 'status';
 type Language = 'en' | 'yo' | 'ha' | 'ig' | 'fr';
@@ -67,8 +68,18 @@ export default function WidgetPage() {
   const [userPhone, setUserPhone] = useState('');
   const [userName, setUserName] = useState('');
   const [error, setError] = useState('');
+  const [isRecording, setIsRecording] = useState(false);
+  const [complaintText, setComplaintText] = useState('');
 
-  const handleModeSelect = (selected: 'sign' | 'type') => {
+  // Called by SignCapture every 500 ms when a sign is recognised.
+  // Auto-populates the complaint field once confidence is high enough.
+  const handleSignDetected = useCallback((phrase: string, confidence: number) => {
+    if (confidence >= 80) {
+      setComplaintText(phrase);
+    }
+  }, []);
+
+  const handleModeSelect = (_selected: string) => {
     setTimeout(() => setScreen('issue'), 300);
   };
 
@@ -78,6 +89,16 @@ export default function WidgetPage() {
 
   const handleContinue = () => {
     if (selectedIssue) setScreen('record');
+  };
+
+  const goToConfirm = () => {
+    setIsRecording(false);
+    setScreen('confirm');
+  };
+
+  const redoSigning = () => {
+    setComplaintText('');
+    setScreen('record');
   };
 
   const handleSubmitComplaint = async () => {
@@ -98,7 +119,7 @@ export default function WidgetPage() {
           name: userName,
           language,
           issue_type: selectedIssue,
-          description: `Customer reported: ${ISSUES.find(i => i.id === selectedIssue)?.label}`,
+          description: complaintText || `Customer reported: ${ISSUES.find(i => i.id === selectedIssue)?.label}`,
           confidence_score: 82,
         }),
       });
@@ -137,64 +158,119 @@ export default function WidgetPage() {
               <EchoAvatar isSigning={screen !== 'status'} bubble={BUBBLES[screen][language]} onReplay={() => {}} />
 
               <div className="flex-1 px-4 py-4 flex flex-col gap-3 overflow-y-auto">
-                {error && <div className="bg-red-100 border border-red-300 text-red-700 px-3 py-2 rounded text-xs">{error}</div>}
+                {error && (
+                  <div className="bg-red-100 border border-red-300 text-red-700 px-3 py-2 rounded text-xs">
+                    {error}
+                  </div>
+                )}
 
+                {/* ── WELCOME ── */}
                 {screen === 'welcome' && (
                   <>
                     <input type="tel" placeholder="Phone" value={userPhone} onChange={(e) => setUserPhone(e.target.value)} className="w-full px-3 py-2 border border-gray-300 rounded text-sm" />
                     <input type="text" placeholder="Name" value={userName} onChange={(e) => setUserName(e.target.value)} className="w-full px-3 py-2 border border-gray-300 rounded text-sm" />
                     <p className="text-xs font-bold text-gray-500 uppercase tracking-wider">Choose your mode</p>
-                    <TileGrid tiles={[{ id: 'sign', icon: '🤟', label: 'Sign language' }, { id: 'type', icon: '✏️', label: 'Type it' }]} onSelect={handleModeSelect} />
+                    <TileGrid
+                      tiles={[{ id: 'sign', icon: '🤟', label: 'Sign language' }, { id: 'type', icon: '✏️', label: 'Type it' }]}
+                      onSelect={handleModeSelect}
+                    />
                   </>
                 )}
 
+                {/* ── ISSUE ── */}
                 {screen === 'issue' && (
                   <>
                     <ProgressBar current={1} total={4} />
                     <p className="text-xs font-bold text-gray-500 uppercase tracking-wider">What is the problem?</p>
-                    <TileGrid tiles={ISSUES.map((i) => ({ id: i.id, icon: i.icon, label: i.label }))} selected={selectedIssue} onSelect={handleIssueSelect} />
-                    {selectedIssue && <button onClick={handleContinue} className="w-full bg-[#0A1628] text-white py-3 rounded-lg font-bold text-sm">Continue →</button>}
+                    <TileGrid
+                      tiles={ISSUES.map((i) => ({ id: i.id, icon: i.icon, label: i.label }))}
+                      selected={selectedIssue}
+                      onSelect={handleIssueSelect}
+                    />
+                    {selectedIssue && (
+                      <button onClick={handleContinue} className="w-full bg-[#0A1628] text-white py-3 rounded-lg font-bold text-sm">
+                        Continue →
+                      </button>
+                    )}
                   </>
                 )}
 
+                {/* ── RECORD ── */}
                 {screen === 'record' && (
                   <>
                     <ProgressBar current={2} total={4} />
-                    <div className="bg-white border-2 border-dashed border-gray-300 rounded-lg p-5 text-center flex flex-col gap-2">
-                      <div className="text-3xl">📹</div>
-                      <p className="text-sm font-bold text-gray-900">Sign here</p>
-                      <p className="text-xs text-gray-500">🔒 Video never leaves your phone</p>
-                      <button onClick={() => setScreen('confirm')} className="w-full bg-[#00D4AA] text-[#0A1628] py-2 rounded font-bold text-sm">
-                        Start signing
+
+                    {/* Live camera + skeleton overlay + confidence bar + result panel */}
+                    <SignCapture
+                      isRecording={isRecording}
+                      targetLanguage={language}
+                      onSignDetected={handleSignDetected}
+                    />
+
+                    {/* Auto-populated complaint text — editable */}
+                    <div>
+                      <p className="text-xs font-bold text-gray-500 uppercase tracking-wider mb-1">
+                        Detected complaint
+                      </p>
+                      <textarea
+                        value={complaintText}
+                        onChange={(e) => setComplaintText(e.target.value)}
+                        placeholder="Sign to auto-fill, or type here…"
+                        rows={3}
+                        className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm resize-none focus:outline-none focus:border-[#00D4AA]"
+                      />
+                    </div>
+
+                    {/* Record toggle */}
+                    <button
+                      onClick={() => setIsRecording((r) => !r)}
+                      className="w-full py-2 rounded-lg font-bold text-sm transition-colors"
+                      style={isRecording
+                        ? { background: '#E8445A', color: '#fff' }
+                        : { background: '#00D4AA', color: '#0A1628' }
+                      }
+                    >
+                      {isRecording ? '■  Stop signing' : '●  Start signing'}
+                    </button>
+
+                    {complaintText.trim() && (
+                      <button
+                        onClick={goToConfirm}
+                        className="w-full bg-[#0A1628] text-white py-3 rounded-lg font-bold text-sm"
+                      >
+                        Continue →
                       </button>
-                    </div>
-                    <div className="bg-white border border-gray-200 rounded p-3 text-xs">
-                      <div className="flex justify-between">
-                        <span>Confidence</span>
-                        <span className="text-[#00C896] font-bold">82% — Good</span>
-                      </div>
-                      <div className="bg-gray-200 h-1 rounded mt-1 overflow-hidden">
-                        <div className="bg-[#00C896] h-full w-4/5"></div>
-                      </div>
-                    </div>
+                    )}
                   </>
                 )}
 
+                {/* ── CONFIRM ── */}
                 {screen === 'confirm' && (
                   <>
                     <ProgressBar current={3} total={4} />
                     <div className="bg-[#F0FBF9] border border-[#00D4AA] rounded-lg p-3 text-sm">
                       <div className="flex gap-2 items-start mb-2">
                         <div className="text-2xl">{ISSUES.find((i) => i.id === selectedIssue)?.icon}</div>
-                        <p className="text-xs text-gray-600">{ISSUES.find((i) => i.id === selectedIssue)?.label}</p>
+                        <div>
+                          <p className="text-xs font-bold text-gray-800">
+                            {ISSUES.find((i) => i.id === selectedIssue)?.label}
+                          </p>
+                          {complaintText && (
+                            <p className="text-xs text-gray-600 mt-1">{complaintText}</p>
+                          )}
+                        </div>
                       </div>
                       <p className="text-xs text-gray-500">This is what will be sent to your bank</p>
                     </div>
                     <p className="text-xs font-bold text-gray-500 uppercase">Is this correct?</p>
-                    <TileGrid tiles={[{ id: 'yes', icon: '✅', label: 'Yes, send it' }, { id: 'no', icon: '↩️', label: 'No, redo it' }]} onSelect={(id) => (id === 'yes' ? handleSubmitComplaint() : setScreen('record'))} />
+                    <TileGrid
+                      tiles={[{ id: 'yes', icon: '✅', label: loading ? 'Sending…' : 'Yes, send it' }, { id: 'no', icon: '↩️', label: 'No, redo it' }]}
+                      onSelect={(id) => (id === 'yes' ? handleSubmitComplaint() : redoSigning())}
+                    />
                   </>
                 )}
 
+                {/* ── STATUS ── */}
                 {screen === 'status' && (
                   <>
                     <div className="bg-[#F0FBF9] border border-[#00D4AA] rounded-lg p-3 text-sm mb-3">
@@ -206,12 +282,21 @@ export default function WidgetPage() {
                         <span>{ISSUES.find((i) => i.id === selectedIssue)?.icon}</span>
                         {ISSUES.find((i) => i.id === selectedIssue)?.label}
                       </p>
+                      {complaintText && (
+                        <p className="text-xs text-gray-500 mt-1">{complaintText}</p>
+                      )}
                     </div>
                     <p className="text-xs font-bold text-gray-500 uppercase">Status</p>
                     <div className="space-y-3 text-sm">
-                      {[{ dot: '✓', title: 'Bank received complaint', time: 'Just now', done: true }, { dot: '●', title: 'Staff reviewing', time: 'Now', done: false, active: true }, { dot: '○', title: 'Resolved', time: 'Pending', done: false }].map((item, i) => (
+                      {[
+                        { dot: '✓', title: 'Bank received complaint', time: 'Just now', done: true },
+                        { dot: '●', title: 'Staff reviewing', time: 'Now', done: false, active: true },
+                        { dot: '○', title: 'Resolved', time: 'Pending', done: false },
+                      ].map((item, i) => (
                         <div key={i} className="flex gap-2">
-                          <div className={`flex-shrink-0 ${item.done ? 'text-[#00C896]' : item.active ? 'text-[#0A1628]' : 'text-gray-300'}`}>{item.dot}</div>
+                          <div className={`flex-shrink-0 ${item.done ? 'text-[#00C896]' : item.active ? 'text-[#0A1628]' : 'text-gray-300'}`}>
+                            {item.dot}
+                          </div>
                           <div>
                             <p className={`text-xs font-bold ${item.done || item.active ? 'text-gray-900' : 'text-gray-400'}`}>{item.title}</p>
                             <p className="text-xs text-gray-500">{item.time}</p>
