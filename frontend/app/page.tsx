@@ -107,7 +107,7 @@ export default function WelcomePage() {
             ))}
           </nav>
           <p className="text-center text-xs" style={{ color: 'rgba(255,255,255,0.18)' }}>
-            © 2025 EchoSign · Accessible banking for all
+            © {new Date().getFullYear()} EchoSign · Accessible banking for all
           </p>
         </div>
       </footer>
