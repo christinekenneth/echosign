@@ -187,8 +187,8 @@ function SignView({ language, onLangChange, router }: ViewProps) {
               )}
             </div>
 
-            {/* Avatar — hidden on mobile, visible on sm+ */}
-            <div className="sm:flex-1 relative overflow-hidden" style={{ height: 'clamp(200px, 55vw, 300px)' }}>
+            {/* Avatar — stacks below camera on mobile, side-by-side on sm+ */}
+            <div className="flex-1 sm:flex-1 relative overflow-hidden" style={{ minHeight: 'clamp(200px, 55vw, 300px)' }}>
               <AvatarMirror
                 getFrame={getFrame}
                 poseBuffer={poseBuffer}
@@ -394,8 +394,15 @@ function TextView({ language, onLangChange, router }: ViewProps) {
     <div className="flex-1" style={{ background: '#F9FAFB' }}>
       <div className="max-w-2xl mx-auto px-4 py-4 flex flex-col gap-4">
 
-        {/* Progress + language */}
+        {/* Back + Progress + language */}
         <div className="flex items-center gap-3">
+          <button
+            onClick={() => router.push('/')}
+            className="shrink-0 text-sm font-bold px-2 py-1 rounded-lg"
+            style={{ color: '#0A1628', background: 'rgba(10,22,40,0.08)' }}
+          >
+            ←
+          </button>
           <div className="flex-1">
             <ProgressBar current={1} total={4} />
           </div>
