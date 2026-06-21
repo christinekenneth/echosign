@@ -188,7 +188,7 @@ function SignView({ language, onLangChange, router }: ViewProps) {
             </div>
 
             {/* Avatar — hidden on mobile, visible on sm+ */}
-            <div className="hidden sm:block sm:flex-1 relative overflow-hidden">
+            <div className="sm:flex-1 relative overflow-hidden" style={{ height: 'clamp(200px, 55vw, 300px)' }}>
               <AvatarMirror
                 getFrame={getFrame}
                 poseBuffer={poseBuffer}
