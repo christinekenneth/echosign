@@ -1,4 +1,41 @@
 import { NextRequest, NextResponse } from 'next/server'
+import { spawn } from 'child_process'
+import path from 'path'
+
+const PREDICT_SCRIPT = path.join(process.cwd(), '..', 'ai-model', 'predict.py')
+
+// ─── ML MODEL CALLER ─────────────────────────────────────────
+// Spawns predict.py, pipes landmarks JSON to stdin, reads result from stdout.
+// Returns null on any error so the rule-based fallback takes over.
+function callMLModel(
+  landmarks: Landmark[],
+  numHands: number
+): Promise<{ sign: string; label: string; confidence: number } | null> {
+  return new Promise((resolve) => {
+    const proc = spawn('python', [PREDICT_SCRIPT])
+    let stdout = ''
+
+    proc.stdout.on('data', (chunk: Buffer) => { stdout += chunk.toString() })
+    proc.on('error', () => resolve(null))
+
+    const timer = setTimeout(() => { proc.kill(); resolve(null) }, 5000)
+
+    proc.on('close', () => {
+      clearTimeout(timer)
+      try {
+        const result = JSON.parse(stdout.trim())
+        if (result.error) return resolve(null)
+        resolve({ sign: result.sign, label: result.label, confidence: Math.round(result.confidence * 100) })
+      } catch {
+        resolve(null)
+      }
+    })
+
+    const flat = landmarks.flatMap((lm) => [lm.x, lm.y, lm.z])
+    proc.stdin.write(JSON.stringify({ landmarks: flat, num_hands: numHands }))
+    proc.stdin.end()
+  })
+}
 
 // ─── MEDIAPIPE HAND LANDMARK INDICES ─────────────────────────
 const LM = {
@@ -339,6 +376,34 @@ export async function POST(request: NextRequest) {
     }
 
     const bothHands = secondaryHand !== null
+    const numHands  = bothHands ? 2 : 1
+
+    // Try trained ML model first; fall back to rule-based if unavailable
+    const mlResult = await callMLModel(dominantHand, numHands)
+
+    if (mlResult && mlResult.confidence >= RECOGNITION_THRESHOLD) {
+      const { text: translatedPhrase, confidence: translationConfidence } =
+        await translatePhrase(mlResult.sign, targetLanguage)
+      return NextResponse.json({
+        status: 'success',
+        data: {
+          recognised:            true,
+          sign:                  mlResult.sign,
+          label:                 mlResult.label,
+          handedness:            dominantHandedness,
+          bothHands,
+          phrase:                mlResult.sign,
+          translatedPhrase,
+          targetLanguage,
+          translationConfidence: targetLanguage === 'en' ? null : translationConfidence,
+          confidence:            mlResult.confidence,
+          category:              'bsl_alphabet',
+          detectionMethod:       'ml',
+        },
+      })
+    }
+
+    // Rule-based fallback
     const { signId, confidence } = bothHands
       ? detectTwoHandSign(dominantHand)
       : detectOneHandSign(dominantHand)
@@ -366,16 +431,17 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({
       status: 'success',
       data: {
-        recognised:          true,
-        sign:                sign.id,
-        handedness:          dominantHandedness,
+        recognised:            true,
+        sign:                  sign.id,
+        handedness:            dominantHandedness,
         bothHands,
-        phrase:              sign.phrase,
+        phrase:                sign.phrase,
         translatedPhrase,
         targetLanguage,
         translationConfidence: targetLanguage === 'en' ? null : translationConfidence,
         confidence,
-        category:            sign.category,
+        category:              sign.category,
+        detectionMethod:       'rule-based',
       },
     })
   } catch (error) {
@@ -415,6 +481,16 @@ export async function GET() {
     twoHandSigns: Object.values(TWO_HAND_SIGNS).map((s) => ({
       id: s.id, phrase: s.phrase, description: s.description, category: s.category,
     })),
+    bslAlphabetSigns: {
+      note: 'Recognised by trained ML model (Random Forest on MediaPipe landmarks). One-hand signs use dominantHand only; two-hand signs require secondaryHand.',
+      oneHand: ['C', 'Zero', 'One', 'Two', 'Three', 'Four', 'Five', 'Six', 'Seven', 'Eight', 'Nine'],
+      twoHand: ['A', 'B', 'D', 'E', 'F', 'G', 'I', 'K', 'L', 'M', 'N', 'O', 'P', 'Q', 'R', 'S', 'T', 'Ten', 'U', 'V', 'W', 'X', 'Z'],
+    },
     landmarkReference: 'MediaPipe Hands — 21 keypoints. 0=wrist, 4=thumb tip, 8=index tip, 12=middle tip, 16=ring tip, 20=pinky tip.',
+    detectionMethods: {
+      ml: 'Trained Random Forest on Kaggle BSL landmark dataset — covers alphabet and numbers.',
+      ruleBased: 'Hand-coded geometric scoring — covers 5 one-hand and 5 two-hand complaint phrases.',
+      priority: 'ML model is tried first; rule-based activates if model is unavailable or confidence < 50.',
+    },
   })
 }

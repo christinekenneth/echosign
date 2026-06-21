@@ -19,34 +19,59 @@ const SUPPORTED_LANGUAGES = [
 // This function translates text using MyMemory API
 // MyMemory is free and requires no API key
 // We will swap this for Google Translate later
+interface MyMemoryResult {
+  translatedText: string
+  confidence: number
+  error?: string
+}
+
 async function translateWithMyMemory(
   text: string,
   fromLang: string,
   toLang: string
-): Promise<{ translatedText: string; confidence: number }> {
-  
-  // If the source and target language are the same
-  // no translation needed — return as is
+): Promise<MyMemoryResult> {
   if (fromLang === toLang) {
     return { translatedText: text, confidence: 100 }
   }
 
-  // Build the MyMemory API URL
-  // Format is: langpair=sourceLang|targetLang
   const url = `https://api.mymemory.translated.net/get?q=${encodeURIComponent(text)}&langpair=${fromLang}|${toLang}`
 
-  const response = await fetch(url)
-  const data = await response.json()
+  let response: Response
+  try {
+    response = await fetch(url)
+  } catch (e) {
+    return { translatedText: text, confidence: 0, error: `Network error: ${String(e)}` }
+  }
 
-  // MyMemory returns a match value between 0 and 1
-  // We multiply by 100 to get a percentage
-  const confidence = Math.round(
-    (data.responseData?.match || 0) * 100
-  )
+  // MyMemory can return HTML on rate-limit or server errors — guard the JSON parse
+  let data: any
+  try {
+    data = await response.json()
+  } catch {
+    return {
+      translatedText: text,
+      confidence: 0,
+      error: `MyMemory returned a non-JSON response (HTTP ${response.status}). The free tier has a daily limit — try again later.`,
+    }
+  }
+
+  // MyMemory signals errors via responseStatus in the JSON body (not HTTP status)
+  if (data.responseStatus && data.responseStatus !== 200) {
+    return {
+      translatedText: text,
+      confidence: 0,
+      error: data.responseDetails || `MyMemory error ${data.responseStatus}`,
+    }
+  }
+
+  const translated = data.responseData?.translatedText as string | undefined
+  if (!translated) {
+    return { translatedText: text, confidence: 0, error: 'Empty response from translation service' }
+  }
 
   return {
-    translatedText: data.responseData?.translatedText || text,
-    confidence,
+    translatedText: translated,
+    confidence: Math.round((data.responseData?.match || 0) * 100),
   }
 }
 
@@ -87,6 +112,12 @@ export async function POST(request: NextRequest) {
 
     if (fromLanguage !== 'en') {
       const result = await translateWithMyMemory(text, fromLanguage, 'en')
+      if (result.error) {
+        return NextResponse.json(
+          { status: 'error', message: result.error },
+          { status: 422 }
+        )
+      }
       englishText = result.translatedText
       toEnglishConfidence = result.confidence
     }
@@ -98,6 +129,12 @@ export async function POST(request: NextRequest) {
 
     if (toLanguage !== 'en') {
       const result = await translateWithMyMemory(englishText, 'en', toLanguage)
+      if (result.error) {
+        return NextResponse.json(
+          { status: 'error', message: result.error },
+          { status: 422 }
+        )
+      }
       finalText = result.translatedText
       toTargetConfidence = result.confidence
     }

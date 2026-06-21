@@ -2,83 +2,42 @@
 
 import { useEffect, useRef, useState, useCallback } from 'react'
 
-// ─── MEDIAPIPE CDN TYPES ──────────────────────────────────────
-// @mediapipe/hands exports window.Hands; holistic does not reliably
-// expose window.Holistic in all CDN environments.
-declare global {
-  interface Window {
-    Hands:  new (config: { locateFile: (file: string) => string }) => HandsInstance
-    Camera: new (videoEl: HTMLVideoElement, config: CameraConfig)  => CameraInstance
-  }
-}
-
-interface HandsInstance {
-  setOptions(options: Record<string, unknown>): void
-  onResults(callback: (results: HandsResults) => void): void
-  send(input: { image: HTMLVideoElement }): Promise<void>
-  close(): void
-}
-
-interface CameraInstance {
-  start(): Promise<void>
-  stop(): void
-}
-
-interface CameraConfig {
-  onFrame: () => Promise<void>
-  width: number
-  height: number
-}
-
+// ─── TYPES ────────────────────────────────────────────────────
 interface Landmark { x: number; y: number; z: number }
 
-// @mediapipe/hands result shape
-interface HandsResults {
-  multiHandLandmarks?: Landmark[][]
-  // "Left"/"Right" are from the camera's perspective (mirror of user)
-  multiHandedness?: Array<{ label: 'Left' | 'Right'; score: number }>
+interface PredictResult {
+  recognised:        boolean
+  sign?:             string
+  label?:            string
+  phrase?:           string
+  translatedPhrase?: string
+  source?:           string
+  confidence:        number
+  handUsed?:         'one' | 'two' | 'sequence'
+  message?:          string
 }
 
-interface HandsData {
-  dominantHand:       Landmark[]
-  secondaryHand:      Landmark[] | null
-  dominantHandedness: 'right' | 'left'
-}
-
-interface SignResult {
-  recognised:         boolean
-  sign?:              string
-  handedness?:        string
-  bothHands?:         boolean
-  phrase?:            string
-  translatedPhrase?:  string
-  targetLanguage?:    string
-  confidence:         number
-  suggestions?:       Array<{ id: string; description: string }>
-}
-
-// ─── PROPS ────────────────────────────────────────────────────
 interface SignCaptureProps {
-  isRecording:     boolean
-  targetLanguage:  string
-  onSignDetected:  (phrase: string, confidence: number) => void
+  isRecording:        boolean
+  targetLanguage:     string
+  onSignDetected:     (phrase: string, confidence: number) => void
+  onHandsDetected?:   (count: number) => void
+  onPoseResults?:     (results: any) => void   // full Holistic result every frame
+  compact?:           boolean
 }
 
-// ─── CDN ──────────────────────────────────────────────────────
-const CDN        = 'https://cdn.jsdelivr.net/npm'
-const HANDS_PKG  = '@mediapipe/hands@0.4.1646424915'
-const CAMERA_PKG = '@mediapipe/camera_utils@0.3.1640029074'
+// ─── SEQUENCE HELPERS ────────────────────────────────────────
+const SEQ_LEN   = 30
+const MIN_FRAMES = 15   // start predicting once we have this many frames
 
-function loadScript(src: string): Promise<void> {
-  return new Promise((resolve, reject) => {
-    if (document.querySelector(`script[src="${src}"]`)) { resolve(); return }
-    const s = document.createElement('script')
-    s.src = src
-    s.crossOrigin = 'anonymous'
-    s.onload  = () => resolve()
-    s.onerror = () => reject(new Error(`Failed to load ${src}`))
-    document.head.appendChild(s)
-  })
+function resampleTo30(frames: number[][]): number[] {
+  const n   = frames.length
+  const out: number[] = []
+  for (let i = 0; i < SEQ_LEN; i++) {
+    const src = n <= 1 ? 0 : Math.round((i / (SEQ_LEN - 1)) * (n - 1))
+    out.push(...frames[Math.min(src, n - 1)])
+  }
+  return out
 }
 
 // ─── SKELETON CONNECTIONS ─────────────────────────────────────
@@ -91,49 +50,82 @@ const HAND_CONNECTIONS: Array<[number, number]> = [
   [5,9],[9,13],[13,17],
 ]
 
+const HOLISTIC_CDN = 'https://cdn.jsdelivr.net/npm/@mediapipe/holistic'
+
 // ─── COMPONENT ────────────────────────────────────────────────
-export default function SignCapture({ isRecording, targetLanguage, onSignDetected }: SignCaptureProps) {
-  const videoRef          = useRef<HTMLVideoElement>(null)
-  const canvasRef         = useRef<HTMLCanvasElement>(null)
-  const handsInstanceRef  = useRef<HandsInstance | null>(null)
-  const cameraRef         = useRef<CameraInstance | null>(null)
-  const intervalRef       = useRef<ReturnType<typeof setInterval> | null>(null)
-  const handsDataRef      = useRef<HandsData | null>(null)
-  const isSendingRef      = useRef(false)
-  const targetLangRef     = useRef(targetLanguage)
-  const onSignDetectedRef = useRef(onSignDetected)
+export default function SignCapture({
+  isRecording,
+  targetLanguage,
+  onSignDetected,
+  onHandsDetected,
+  onPoseResults,
+  compact,
+}: SignCaptureProps) {
+  const videoRef           = useRef<HTMLVideoElement>(null)
+  const canvasRef          = useRef<HTMLCanvasElement>(null)
+  const holisticRef        = useRef<any>(null)
+  const streamRef          = useRef<MediaStream | null>(null)
+  const rafRef             = useRef<number | null>(null)
+  const processingRef      = useRef(false)
+  const isSendingRef       = useRef(false)
+  const intervalRef        = useRef<ReturnType<typeof setInterval> | null>(null)
+  const targetLangRef      = useRef(targetLanguage)
+  const onSignDetectedRef  = useRef(onSignDetected)
+  const onHandsDetectedRef = useRef(onHandsDetected)
+  const onPoseResultsRef   = useRef(onPoseResults)
 
-  const [status, setStatus]             = useState<'initializing' | 'ready' | 'error'>('initializing')
-  const [result, setResult]             = useState<SignResult | null>(null)
-  const [handsVisible, setHandsVisible] = useState(0)
-  const [errorMsg, setErrorMsg]         = useState('')
+  // 30-frame rolling buffer: array of 126-float frames
+  const frameBufferRef    = useRef<number[][]>([])
 
-  useEffect(() => { targetLangRef.current = targetLanguage }, [targetLanguage])
-  useEffect(() => { onSignDetectedRef.current = onSignDetected }, [onSignDetected])
+  // Phrase assembly
+  const assembledTextRef  = useRef('')
+  const lastAddedSignRef  = useRef('')
+  const lastAppendTimeRef = useRef(0)
+  const noHandTimerRef    = useRef<ReturnType<typeof setTimeout> | null>(null)
 
-  // ─── CANVAS HELPERS ───────────────────────────────────────────
-  // Resizing the canvas element clears its bitmap, so clearCanvas doubles
-  // as a reset before drawing multiple hands per frame.
-  const clearCanvas = useCallback(() => {
-    const canvas = canvasRef.current
-    const video  = videoRef.current
-    if (!canvas || !video) return
-    canvas.width  = video.videoWidth  || 640
-    canvas.height = video.videoHeight || 480
+  const [status,        setStatus]        = useState<'initializing' | 'ready' | 'error'>('initializing')
+  const [result,        setResult]        = useState<PredictResult | null>(null)
+  const [handsVisible,  setHandsVisible]  = useState(0)
+  const [errorMsg,      setErrorMsg]      = useState('')
+  const [assembledText, setAssembledText] = useState('')
+  const [captionHint,   setCaptionHint]   = useState<'idle' | 'listening' | 'not_recognised'>('idle')
+  const hintTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+
+  useEffect(() => { targetLangRef.current        = targetLanguage  }, [targetLanguage])
+  useEffect(() => { onSignDetectedRef.current     = onSignDetected  }, [onSignDetected])
+  useEffect(() => { onHandsDetectedRef.current    = onHandsDetected }, [onHandsDetected])
+  useEffect(() => { onPoseResultsRef.current      = onPoseResults   }, [onPoseResults])
+
+  // ─── SPACE TIMER ──────────────────────────────────────────────
+  const scheduleSpaceIfNeeded = useCallback(() => {
+    if (lastAddedSignRef.current === '' || noHandTimerRef.current) return
+    noHandTimerRef.current = setTimeout(() => {
+      if (assembledTextRef.current && !assembledTextRef.current.endsWith(' ')) {
+        assembledTextRef.current += ' '
+        setAssembledText(assembledTextRef.current)
+      }
+      lastAddedSignRef.current = ''
+      noHandTimerRef.current   = null
+    }, 1000)
   }, [])
 
-  const drawHand = useCallback((lms: Landmark[], lineColor: string) => {
+  const clearSpaceTimer = useCallback(() => {
+    if (noHandTimerRef.current) {
+      clearTimeout(noHandTimerRef.current)
+      noHandTimerRef.current = null
+    }
+  }, [])
+
+  // ─── CANVAS DRAW ──────────────────────────────────────────────
+  const drawHand = useCallback((lms: Landmark[], color: string) => {
     const canvas = canvasRef.current
     if (!canvas) return
     const ctx = canvas.getContext('2d')
     if (!ctx) return
-
-    // Mirror matches the selfie-flipped video element.
     ctx.save()
     ctx.scale(-1, 1)
     ctx.translate(-canvas.width, 0)
-
-    ctx.strokeStyle = lineColor
+    ctx.strokeStyle = color
     ctx.lineWidth   = 2
     for (const [a, b] of HAND_CONNECTIONS) {
       ctx.beginPath()
@@ -141,96 +133,119 @@ export default function SignCapture({ isRecording, targetLanguage, onSignDetecte
       ctx.lineTo(lms[b].x * canvas.width, lms[b].y * canvas.height)
       ctx.stroke()
     }
-
-    ctx.fillStyle = '#ffffff'
+    ctx.fillStyle = '#fff'
     for (const lm of lms) {
       ctx.beginPath()
       ctx.arc(lm.x * canvas.width, lm.y * canvas.height, 3, 0, Math.PI * 2)
       ctx.fill()
     }
-
     ctx.restore()
   }, [])
 
-  // ─── INIT MEDIAPIPE HANDS ─────────────────────────────────────
+  // ─── INIT ─────────────────────────────────────────────────────
   useEffect(() => {
     let mounted = true
 
     async function init() {
       try {
-        await loadScript(`${CDN}/${HANDS_PKG}/hands.js`)
-        await loadScript(`${CDN}/${CAMERA_PKG}/camera_utils.js`)
+        // Camera
+        const stream = await navigator.mediaDevices.getUserMedia({
+          video: { width: 640, height: 480, facingMode: 'user' },
+        })
+        if (!mounted) { stream.getTracks().forEach(t => t.stop()); return }
+        streamRef.current = stream
+        const video = videoRef.current!
+        video.srcObject = stream
+        await new Promise<void>(res => { video.onloadedmetadata = () => res() })
+        await video.play()
+
+        // MediaPipe Holistic (dynamic import for SSR safety)
+        const mediapipe = await import('@mediapipe/holistic')
         if (!mounted) return
 
-        const hands = new window.Hands({
-          locateFile: (file: string) => `${CDN}/${HANDS_PKG}/${file}`,
+        const holistic = new mediapipe.Holistic({
+          locateFile: (file: string) => `${HOLISTIC_CDN}/${file}`,
+        })
+        holistic.setOptions({
+          modelComplexity:        1,
+          smoothLandmarks:        true,
+          enableSegmentation:     false,
+          refineFaceLandmarks:    false,
+          minDetectionConfidence: 0.5,
+          minTrackingConfidence:  0.5,
         })
 
-        hands.setOptions({
-          maxNumHands:             2,
-          modelComplexity:         1,
-          minDetectionConfidence:  0.5,
-          minTrackingConfidence:   0.5,
-        })
+        let _scDbgFrame = 0
+        holistic.onResults((results: any) => {
+          if (++_scDbgFrame % 90 === 0) {
+            console.log('[SignCapture] Pose landmarks:', results.poseLandmarks?.length)
+          }
+          // Always fire so AvatarMirror gets every frame (face + pose + hands)
+          onPoseResultsRef.current?.(results)
 
-        hands.onResults((results: HandsResults) => {
-          const allLandmarks  = results.multiHandLandmarks  ?? []
-          const allHandedness = results.multiHandedness     ?? []
+          // Sync canvas dimensions only when they change (resetting clears context state)
+          const canvas = canvasRef.current
+          const vid    = videoRef.current
+          if (canvas && vid) {
+            const w = vid.videoWidth  || 640
+            const h = vid.videoHeight || 480
+            if (canvas.width !== w)  canvas.width  = w
+            if (canvas.height !== h) canvas.height = h
+          }
+          const ctx = canvas?.getContext('2d')
+          if (ctx && canvas) ctx.clearRect(0, 0, canvas.width, canvas.height)
 
-          clearCanvas()
+          // Count visible hands
+          const leftLMs  = results.leftHandLandmarks  ?? null
+          const rightLMs = results.rightHandLandmarks ?? null
+          const count    = (leftLMs ? 1 : 0) + (rightLMs ? 1 : 0)
+          setHandsVisible(count)
+          onHandsDetectedRef.current?.(count)
 
-          if (allLandmarks.length === 0) {
-            handsDataRef.current = null
-            setHandsVisible(0)
+          // Build 126-float frame and push into rolling buffer (max SEQ_LEN frames)
+          const left63  = leftLMs
+            ? (leftLMs  as Landmark[]).flatMap(lm => [lm.x, lm.y, lm.z])
+            : new Array(63).fill(0)
+          const right63 = rightLMs
+            ? (rightLMs as Landmark[]).flatMap(lm => [lm.x, lm.y, lm.z])
+            : new Array(63).fill(0)
+          const frameBuf = frameBufferRef.current
+          frameBuf.push([...left63, ...right63])
+          if (frameBuf.length > SEQ_LEN) frameBufferRef.current = frameBuf.slice(-SEQ_LEN)
+
+          if (!leftLMs && !rightLMs) {
+            scheduleSpaceIfNeeded()
             return
           }
 
-          // MediaPipe labels are mirrored: "Left" label = user's right hand.
-          let rightIdx = -1   // index of user's right hand in allLandmarks
-          let leftIdx  = -1   // index of user's left hand
-          allHandedness.forEach((h, i) => {
-            if (h.label === 'Left')  rightIdx = i
-            if (h.label === 'Right') leftIdx  = i
-          })
+          // Draw overlays
+          if (leftLMs)  drawHand(leftLMs,  '#00D4AA')
+          if (rightLMs) drawHand(rightLMs, '#00D4AA88')
 
-          // Prefer the user's right hand as dominant; fall back to whatever is present.
-          const domIdx           = rightIdx >= 0 ? rightIdx : 0
-          const secIdx           = rightIdx >= 0 ? leftIdx  : -1
-          const dominantHandedness: 'right' | 'left' = rightIdx >= 0 ? 'right' : 'left'
-
-          const dominantHand  = allLandmarks[domIdx]
-          const secondaryHand = secIdx >= 0 ? allLandmarks[secIdx] : null
-
-          handsDataRef.current = { dominantHand, secondaryHand, dominantHandedness }
-          setHandsVisible(allLandmarks.length)
-
-          // Dominant hand: full teal. Secondary hand: dimmed teal.
-          drawHand(dominantHand, '#00D4AA')
-          if (secondaryHand) drawHand(secondaryHand, '#00D4AA55')
+          clearSpaceTimer()
         })
 
-        handsInstanceRef.current = hands
+        holisticRef.current = holistic
 
-        const video = videoRef.current
-        if (!video || !mounted) return
+        // RAF loop — send each frame to Holistic
+        const processFrame = async () => {
+          if (!mounted) return
+          if (holisticRef.current && video.readyState >= 2 && !processingRef.current) {
+            processingRef.current = true
+            try {
+              await holisticRef.current.send({ image: video })
+            } catch { /* skip frame */ }
+            finally { processingRef.current = false }
+          }
+          if (mounted) rafRef.current = requestAnimationFrame(processFrame)
+        }
+        rafRef.current = requestAnimationFrame(processFrame)
 
-        const camera = new window.Camera(video, {
-          onFrame: async () => {
-            if (handsInstanceRef.current && video.readyState >= 2) {
-              await handsInstanceRef.current.send({ image: video })
-            }
-          },
-          width:  640,
-          height: 480,
-        })
-
-        cameraRef.current = camera
-        await camera.start()
         if (mounted) setStatus('ready')
       } catch (err) {
         if (mounted) {
           setStatus('error')
-          setErrorMsg(err instanceof Error ? err.message : 'Camera initialisation failed')
+          setErrorMsg(err instanceof Error ? err.message : 'Camera init failed')
         }
       }
     }
@@ -239,74 +254,113 @@ export default function SignCapture({ isRecording, targetLanguage, onSignDetecte
 
     return () => {
       mounted = false
-      cameraRef.current?.stop()
-      handsInstanceRef.current?.close()
+      if (rafRef.current !== null) cancelAnimationFrame(rafRef.current)
+      streamRef.current?.getTracks().forEach(t => t.stop())
+      holisticRef.current?.close()
     }
-  }, [drawHand, clearCanvas])
+  }, [drawHand, scheduleSpaceIfNeeded, clearSpaceTimer])
 
-  // ─── SEND INTERVAL ────────────────────────────────────────────
+  // ─── SIGN DETECTION INTERVAL ──────────────────────────────────
   useEffect(() => {
     if (!isRecording) {
       if (intervalRef.current) { clearInterval(intervalRef.current); intervalRef.current = null }
+      if (hintTimerRef.current) { clearTimeout(hintTimerRef.current); hintTimerRef.current = null }
+      setCaptionHint('idle')
+      clearSpaceTimer()
       return
     }
+    setCaptionHint('listening')
+
+    // Clear the frame buffer so idle frames from before recording don't contaminate
+    // the first prediction (zero-heavy input maps everything to account_forgot_password).
+    frameBufferRef.current    = []
+    assembledTextRef.current  = ''
+    lastAddedSignRef.current  = ''
+    lastAppendTimeRef.current = 0
+    setAssembledText('')
+    setResult(null)
 
     intervalRef.current = setInterval(async () => {
-      const hands = handsDataRef.current
-      if (!hands || isSendingRef.current) return
+      const frames  = frameBufferRef.current.slice()
+      const hasSeq  = frames.length >= MIN_FRAMES
 
+      if (!hasSeq) { scheduleSpaceIfNeeded(); return }
+      if (isSendingRef.current) return
       isSendingRef.current = true
+
       try {
-        const res = await fetch('/api/sign-to-text', {
+        const body = {
+          frameSequence:  resampleTo30(frames),
+          targetLanguage: targetLangRef.current,
+        }
+
+        const res  = await fetch('/api/sign-to-text/predict', {
           method:  'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            dominantHand:       hands.dominantHand,
-            secondaryHand:      hands.secondaryHand,
-            dominantHandedness: hands.dominantHandedness,
-            targetLanguage:     targetLangRef.current,
-          }),
+          body:    JSON.stringify(body),
         })
         const json = await res.json()
+
         if (json.status === 'success') {
           setResult(json.data)
-          if (json.data.recognised && json.data.translatedPhrase) {
-            onSignDetectedRef.current(json.data.translatedPhrase, json.data.confidence)
+          if (json.data.recognised && json.data.phrase) {
+            clearSpaceTimer()
+            setCaptionHint('listening')
+            const phrase    = (json.data.translatedPhrase || json.data.phrase) as string
+            const isSeqMode = hasSeq && json.data.source === 'ml_sequence'
+            const now       = Date.now()
+
+            if (isSeqMode) {
+              if (phrase !== lastAddedSignRef.current && now - lastAppendTimeRef.current >= 1200) {
+                assembledTextRef.current  = phrase
+                setAssembledText(phrase)
+                lastAddedSignRef.current  = phrase
+                lastAppendTimeRef.current = now
+                onSignDetectedRef.current(phrase, json.data.confidence)
+              }
+            } else {
+              if (phrase !== lastAddedSignRef.current && now - lastAppendTimeRef.current >= 800) {
+                assembledTextRef.current += phrase
+                setAssembledText(assembledTextRef.current)
+                lastAddedSignRef.current  = phrase
+                lastAppendTimeRef.current = now
+                onSignDetectedRef.current(assembledTextRef.current, json.data.confidence)
+              }
+            }
+          } else {
+            // Not recognised — flash the hint then return to 'listening'
+            setCaptionHint('not_recognised')
+            if (hintTimerRef.current) clearTimeout(hintTimerRef.current)
+            hintTimerRef.current = setTimeout(() => setCaptionHint('listening'), 2000)
+            scheduleSpaceIfNeeded()
           }
         }
-      } catch {
-        // network error — skip this tick
-      } finally {
-        isSendingRef.current = false
-      }
-    }, 500)
+      } catch { /* network error — skip tick */ }
+      finally { isSendingRef.current = false }
+    }, 1500)
 
     return () => {
       if (intervalRef.current) { clearInterval(intervalRef.current); intervalRef.current = null }
+      clearSpaceTimer()
     }
-  }, [isRecording])
+  }, [isRecording, scheduleSpaceIfNeeded, clearSpaceTimer])
 
-  // ─── DERIVED UI VALUES ────────────────────────────────────────
-  const confPct   = result ? Math.min(result.confidence, 100) : 0
-  const confColor = confPct >= 70 ? '#00D4AA' : confPct >= 50 ? '#F5A623' : '#E8445A'
+  // ─── CLEAR TEXT ───────────────────────────────────────────────
+  const clearText = useCallback(() => {
+    assembledTextRef.current = ''
+    lastAddedSignRef.current = ''
+    clearSpaceTimer()
+    setAssembledText('')
+    setResult(null)
+  }, [clearSpaceTimer])
 
-  const handLabel =
-    handsVisible === 2 ? '2 hands ✓' :
-    handsVisible === 1 ? '1 hand ✓'  : 'No hands'
-
-  // ─── RENDER ───────────────────────────────────────────────────
-  return (
-    <div className="flex flex-col gap-4">
-      {/* Camera preview + skeleton overlay */}
-      <div
-        className="relative rounded-xl overflow-hidden"
-        style={{ background: '#0A1628', aspectRatio: '4/3' }}
-      >
+  // ─── COMPACT MODE — fills parent container ────────────────────
+  if (compact) {
+    return (
+      <div className="relative w-full h-full overflow-hidden" style={{ background: '#0A1628' }}>
         <video
           ref={videoRef}
-          autoPlay
-          playsInline
-          muted
+          autoPlay playsInline muted
           className="w-full h-full object-cover"
           style={{ transform: 'scaleX(-1)' }}
         />
@@ -315,114 +369,105 @@ export default function SignCapture({ isRecording, targetLanguage, onSignDetecte
           className="absolute inset-0 w-full h-full"
           style={{ pointerEvents: 'none' }}
         />
+        {status === 'initializing' && (
+          <div className="absolute inset-0 flex items-center justify-center">
+            <span className="text-xs px-2 py-1 rounded-full bg-black/50 text-white">Loading…</span>
+          </div>
+        )}
+        {status === 'error' && (
+          <div className="absolute inset-0 flex items-center justify-center">
+            <span className="text-xs px-2 py-1 rounded-full bg-red-500/80 text-white">{errorMsg || 'Camera error'}</span>
+          </div>
+        )}
+        {isRecording && !result?.recognised && captionHint !== 'idle' && (
+          <div
+            className="absolute bottom-2 left-1/2 -translate-x-1/2 px-3 py-1 rounded-lg text-xs font-medium"
+            style={{
+              background: captionHint === 'not_recognised' ? 'rgba(232,68,90,0.85)' : 'rgba(0,0,0,0.55)',
+              color: '#fff',
+            }}
+          >
+            {captionHint === 'not_recognised' ? 'Not recognised — try again' : 'Listening…'}
+          </div>
+        )}
+      </div>
+    )
+  }
 
-        {/* Top-left status badge */}
+  // ─── FULL MODE ────────────────────────────────────────────────
+  const confPct   = result ? Math.min(result.confidence, 100) : 0
+  const confColor = confPct >= 70 ? '#00D4AA' : confPct >= 50 ? '#F5A623' : '#E8445A'
+  const handLabel =
+    handsVisible === 2 ? '2 hands ✓' :
+    handsVisible === 1 ? '1 hand ✓'  : 'No hands'
+
+  return (
+    <div className="flex flex-col gap-4">
+      <div className="relative rounded-xl overflow-hidden" style={{ background: '#0A1628', aspectRatio: '4/3' }}>
+        <video ref={videoRef} autoPlay playsInline muted
+          className="w-full h-full object-cover" style={{ transform: 'scaleX(-1)' }} />
+        <canvas ref={canvasRef} className="absolute inset-0 w-full h-full" style={{ pointerEvents: 'none' }} />
+
         <div className="absolute top-3 left-3">
           {status === 'initializing' && (
-            <span className="text-xs px-2 py-1 rounded-full bg-black/50 text-white">
-              Loading camera…
-            </span>
+            <span className="text-xs px-2 py-1 rounded-full bg-black/50 text-white">Loading…</span>
           )}
           {status === 'error' && (
-            <span className="text-xs px-2 py-1 rounded-full bg-red-500/80 text-white">
-              {errorMsg || 'Camera error'}
-            </span>
+            <span className="text-xs px-2 py-1 rounded-full bg-red-500/80 text-white">{errorMsg}</span>
           )}
           {status === 'ready' && isRecording && (
-            <span
-              className="text-xs px-2 py-1 rounded-full text-white font-medium"
-              style={{ background: '#00D4AA' }}
-            >
+            <span className="text-xs px-2 py-1 rounded-full text-white font-medium" style={{ background: '#00D4AA' }}>
               ● Recording
             </span>
           )}
           {status === 'ready' && !isRecording && (
-            <span className="text-xs px-2 py-1 rounded-full bg-black/50 text-white">
-              Ready
-            </span>
+            <span className="text-xs px-2 py-1 rounded-full bg-black/50 text-white">Ready</span>
           )}
         </div>
 
-        {/* Top-right hand count */}
         {status === 'ready' && (
           <div className="absolute top-3 right-3">
-            <span
-              className="text-xs px-2 py-1 rounded-full text-white"
-              style={{
-                background: handsVisible > 0 ? '#00D4AA22' : '#ffffff11',
-                border:     `1px solid ${handsVisible > 0 ? '#00D4AA' : '#ffffff33'}`,
-              }}
-            >
+            <span className="text-xs px-2 py-1 rounded-full text-white"
+              style={{ background: handsVisible > 0 ? '#00D4AA22' : '#ffffff11', border: `1px solid ${handsVisible > 0 ? '#00D4AA' : '#ffffff33'}` }}>
               {handLabel}
             </span>
           </div>
         )}
+
+        {result?.recognised && result.phrase && isRecording && (
+          <div className="absolute bottom-3 left-1/2 -translate-x-1/2 px-4 py-2 rounded-xl text-white font-bold text-2xl"
+            style={{ background: 'rgba(0,212,170,0.85)' }}>
+            {result.translatedPhrase || result.phrase}
+          </div>
+        )}
       </div>
 
-      {/* Confidence bar */}
+      <div className="rounded-xl p-4 min-h-[64px] flex items-center justify-between gap-3"
+        style={{ background: '#0A1628', border: '1px solid #1E3A5F' }}>
+        <span className="font-mono text-lg tracking-widest flex-1 break-all"
+          style={{ color: assembledText ? '#00D4AA' : '#4B6A8A' }}>
+          {assembledText || (isRecording ? 'Sign letters to build text…' : 'Assembled text will appear here')}
+        </span>
+        {assembledText && (
+          <button onClick={clearText} className="text-xs px-3 py-1.5 rounded-lg flex-shrink-0"
+            style={{ background: '#1E3A5F', color: '#9CA3AF' }}>
+            Clear
+          </button>
+        )}
+      </div>
+
       <div>
         <div className="flex justify-between text-xs mb-1" style={{ color: '#0A1628' }}>
           <span>Confidence</span>
           <span style={{ color: result ? confColor : '#9CA3AF' }}>
-            {result ? `${confPct}%` : '—'}
+            {result?.recognised ? `${confPct}%` : '—'}
           </span>
         </div>
         <div className="w-full h-2 rounded-full" style={{ background: '#E5E7EB' }}>
-          <div
-            className="h-2 rounded-full transition-all duration-300"
-            style={{ width: `${confPct}%`, background: confColor }}
-          />
+          <div className="h-2 rounded-full transition-all duration-300"
+            style={{ width: result?.recognised ? `${confPct}%` : '0%', background: confColor }} />
         </div>
       </div>
-
-      {/* Result panel */}
-      {result && (
-        <div
-          className="rounded-xl p-4"
-          style={{ background: '#F7F8FC', border: '1px solid #E5E7EB' }}
-        >
-          {result.recognised ? (
-            <>
-              <p className="text-base font-semibold" style={{ color: '#0A1628' }}>
-                {result.translatedPhrase || result.phrase}
-              </p>
-              {result.translatedPhrase && result.targetLanguage && result.targetLanguage !== 'en' && (
-                <p className="text-xs mt-1" style={{ color: '#6B7280' }}>
-                  {result.phrase}
-                </p>
-              )}
-              <div className="flex items-center gap-2 mt-2">
-                <span className="text-xs font-medium" style={{ color: '#00D4AA' }}>
-                  {result.sign?.replace(/_/g, ' ')}
-                </span>
-                {result.handedness && (
-                  <span
-                    className="text-xs px-1.5 py-0.5 rounded"
-                    style={{ background: '#0A162811', color: '#6B7280' }}
-                  >
-                    {result.bothHands ? 'both hands' : `${result.handedness} hand`}
-                  </span>
-                )}
-              </div>
-            </>
-          ) : (
-            <>
-              <p className="text-sm mb-3" style={{ color: '#6B7280' }}>
-                Sign not recognised — try one of these:
-              </p>
-              <ul className="space-y-1">
-                {result.suggestions?.map((s) => (
-                  <li key={s.id} className="text-xs" style={{ color: '#0A1628' }}>
-                    <span className="font-medium">{s.id.replace(/_/g, ' ')}</span>
-                    {' — '}
-                    {s.description}
-                  </li>
-                ))}
-              </ul>
-            </>
-          )}
-        </div>
-      )}
     </div>
   )
 }

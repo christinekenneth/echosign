@@ -1,0 +1,41 @@
+# Dependencies
+frontend/node_modules/
+frontend/.next/
+
+# Python
+ai-model/__pycache__/
+*.pyc
+
+# Large model files (regenerate with train_video_model.py --json-only)
+ai-model/model/bsl_classifier_one_hand.pkl
+ai-model/model/bsl_classifier_two_hand.pkl
+ai-model/model/label_encoder_one_hand.pkl
+ai-model/model/label_encoder_two_hand.pkl
+ai-model/model/scaler_one_hand.pkl
+ai-model/model/scaler_two_hand.pkl
+
+# Large datasets
+ai-model/data/one_hand_dataset.csv
+ai-model/data/two_hand_dataset.csv
+ai-model/data/asl_alphabet/
+ai-model/data/youtube_asl/
+ai-model/data/asl_recordings/
+
+# MediaPipe task file (auto-downloaded by train script)
+ai-model/hand_landmarker.task
+
+# Training log
+ai-model/train.log
+
+# IDE
+.vscode/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Env files
+.env
+.env.local
+frontend/.env
+frontend/.env.local

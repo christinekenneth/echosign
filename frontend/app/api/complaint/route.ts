@@ -303,29 +303,76 @@ export async function POST(request: NextRequest) {
 }
 
 // ─── GET /api/complaint ───────────────────────────────────────
-export async function GET() {
-  return NextResponse.json({
-    status: 'success',
-    message: 'EchoSign Complaint Submission Endpoint',
-    usage: {
-      method: 'POST',
-      body: {
-        text: 'Complaint text in any supported language',
-        language: 'Language code e.g. yo, en, ha, ig, fr',
-        inputMode: 'text or sign',
-        sector: 'finance, healthcare, education, government, telecoms',
-        institutionId: 'ID of the institution (optional)',
+// ?list=true  → returns all complaints from the database
+// (no param)  → returns endpoint documentation
+export async function GET(request: NextRequest) {
+  const { searchParams } = new URL(request.url)
+
+  if (searchParams.get('list') !== 'true') {
+    return NextResponse.json({
+      status: 'success',
+      message: 'EchoSign Complaint Submission Endpoint',
+      usage: {
+        method: 'POST',
+        body: {
+          text:          'Complaint text in any supported language',
+          language:      'Language code e.g. yo, en, ha, ig, fr',
+          inputMode:     'text or sign',
+          sector:        'finance, healthcare, education, government, telecoms',
+          institutionId: 'ID of the institution (optional)',
+        },
+        example: {
+          text:      'My card is not working and I cannot withdraw money',
+          language:  'en',
+          inputMode: 'text',
+          sector:    'finance',
+        },
       },
-      example: {
-        text: 'My card is not working and I cannot withdraw money',
-        language: 'en',
-        inputMode: 'text',
-        sector: 'finance',
+      categories: CATEGORIES.map((c) => ({ id: c.id, label: c.label })),
+    })
+  }
+
+  try {
+    const { data: complaints, error } = await supabaseAdmin
+      .from('complaints')
+      .select('id, reference, issue_type, sector, original_language, original_text, english_text, status, input_mode, created_at, updated_at')
+      .order('created_at', { ascending: false })
+
+    if (error) throw error
+
+    const ISSUE_LABELS: Record<string, string> = {
+      failed_transfer: 'Failed or delayed transfer',
+      card_problem:    'Card not working',
+      atm_issue:       'ATM problem',
+      account_access:  'Cannot access account',
+      fraud:           'Fraud or stolen money',
+      other:           'Other issue',
+    }
+
+    return NextResponse.json({
+      status: 'success',
+      data: {
+        complaints: (complaints ?? []).map((c) => ({
+          id:          c.id,
+          reference:   c.reference,
+          issueType:   c.issue_type,
+          issueLabel:  ISSUE_LABELS[c.issue_type] ?? c.issue_type,
+          sector:      c.sector,
+          language:    c.original_language,
+          text:        c.original_text,
+          englishText: c.english_text,
+          status:      c.status,
+          inputMode:   c.input_mode,
+          submittedAt: c.created_at,
+          updatedAt:   c.updated_at,
+        })),
+        total: complaints?.length ?? 0,
       },
-    },
-    categories: CATEGORIES.map((c) => ({
-      id: c.id,
-      label: c.label,
-    })),
-  })
+    })
+  } catch (error) {
+    return NextResponse.json(
+      { status: 'error', message: 'Failed to fetch complaints', error: String(error) },
+      { status: 500 }
+    )
+  }
 }

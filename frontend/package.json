@@ -9,16 +9,22 @@
     "lint": "eslint"
   },
   "dependencies": {
+    "@mediapipe/hands": "^0.4.1675469240",
+    "@mediapipe/holistic": "^0.5.1675471629",
+    "@pixiv/three-vrm": "^2.1.0",
     "@supabase/supabase-js": "^2.105.1",
+    "kalidokit": "^1.1.4",
     "next": "16.2.2",
     "react": "19.2.4",
-    "react-dom": "19.2.4"
+    "react-dom": "19.2.4",
+    "three": "^0.163.0"
   },
   "devDependencies": {
     "@tailwindcss/postcss": "^4",
     "@types/node": "^20",
     "@types/react": "^19",
     "@types/react-dom": "^19",
+    "@types/three": "^0.163.0",
     "eslint": "^9",
     "eslint-config-next": "16.2.2",
     "tailwindcss": "^4",

@@ -72,36 +72,6 @@ export default function EchoAvatar({ isSigning, bubble, onReplay }: EchoAvatarPr
         ↺ Replay signing
       </button>
 
-      <style jsx>{`
-        @keyframes wave-left {
-          0% {
-            transform: rotate(-44deg) translateY(-3px);
-          }
-          50% {
-            transform: rotate(-22deg) translateY(-7px);
-          }
-          100% {
-            transform: rotate(-44deg) translateY(-3px);
-          }
-        }
-        @keyframes wave-right {
-          0% {
-            transform: rotate(44deg) translateY(-3px);
-          }
-          50% {
-            transform: rotate(22deg) translateY(-7px);
-          }
-          100% {
-            transform: rotate(44deg) translateY(-3px);
-          }
-        }
-        .animate-wave-left {
-          animation: wave-left 1s ease-in-out infinite;
-        }
-        .animate-wave-right {
-          animation: wave-right 1s ease-in-out infinite;
-        }
-      `}</style>
     </div>
   );
 }
