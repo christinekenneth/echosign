@@ -63,8 +63,15 @@ export default function ConfirmPage() {
     <div className="flex-1" style={{ background: '#F9FAFB' }}>
       <div className="max-w-2xl mx-auto px-4 py-6 flex flex-col gap-4">
 
-        {/* Progress + back */}
-        <div className="flex items-center gap-4">
+        {/* Progress + back + home */}
+        <div className="flex items-center gap-3">
+          <button
+            onClick={() => router.push('/')}
+            className="shrink-0 text-xs font-bold px-3 py-1.5 rounded-lg"
+            style={{ background: 'rgba(10,22,40,0.08)', color: '#0A1628' }}
+          >
+            ← Home
+          </button>
           <div className="flex-1">
             <ProgressBar current={2} total={4} />
           </div>
